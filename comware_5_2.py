@@ -296,7 +296,6 @@ class Comware_5_2(object):
     def _get_config_dict(self, config_list):
         keywords = ['sysname',
                     'ftp server',
-                    'domain default enable',
                     'telnet server',
                     'ssh server',
                     'ip ttl-expires',
@@ -314,14 +313,25 @@ class Comware_5_2(object):
                               'access',
                               'hybrid',
                               'trunk']
+        radius_scheme_keywords = ['server-type',
+                                  'nas-ip',
+                                  'user-name-format']
+        snmp_keywords = ['sys-info contact',
+                         'sys-info location',
+                         'sys-info version',
+                         'usm-user',
+                         'group']
         uinterface_keywords = ['acl',
                                'protocol inbound',
                                'authentication-mode']
         config_dict = {'sysname': {},
                        'interfaces': {},
                        'vlans': {},
-                       'user-interfaces': {},
-                       'local-user': {}}
+                       'user_interfaces': {},
+                       'domain': {},
+                       'snmp': {},
+                       'radius_scheme': {},
+                       'local_user': {}}
         # OK, maybe this has some duplication, but parsing through
         # current-configuration is somewhat tricky.
         # TODO: break into methods and make generic as possible
@@ -416,8 +426,8 @@ class Comware_5_2(object):
             m = re.search('^user-interface\s(\w+)(.*?)$', line, re.DOTALL)
             if m and len(m.group(1)):
                 uinterface = m.group(1)
-                if uinterface not in config_dict['user-interfaces']:
-                 config_dict['user-interfaces'][uinterface] = {}
+                if uinterface not in config_dict['user_interfaces']:
+                 config_dict['user_interfaces'][uinterface] = {}
                 uint_dict = {}
                 if len(m.group(2)):
                  uinterface_index = m.group(2).split()
@@ -427,7 +437,11 @@ class Comware_5_2(object):
                   uinterface_index_stop = uinterface_index[1]
                 for uindex in range(int(uinterface_index_start), int(uinterface_index_stop)+1):
 #                 uint_dict[str(uindex)] = {}
-                 config_dict['user-interfaces'][uinterface][str(uindex)] = {}
+                 config_dict['user_interfaces'][uinterface][str(uindex)] = {}
+                 if uinterface == 'vty':
+                  config_dict['user_interfaces'][uinterface][str(uindex)]['protocol_inbound'] = 'all'
+                  config_dict['user_interfaces'][uinterface][str(uindex)]['acl'] = 'none'
+
                 for uiline in config_list[i+1:len(config_list)]:
                     if re.match('^#$', uiline):
                         break
@@ -438,11 +452,17 @@ class Comware_5_2(object):
                                        '\s(.*)$', uiline)
                         if m1 and len(m1.group(1)):
                           value = m1.group(1)
+                          if key == 'authentication-mode':
+                             pkey = 'authentication_mode'
+                          elif key == 'protocol inbound':
+                             pkey = 'protocol_inbound'
+                          else:
+                             pkey = key
                           if len(m.group(2)):
                             for uindex in range(int(uinterface_index_start), int(uinterface_index_stop)+1):
-                              config_dict['user-interfaces'][uinterface][str(uindex)][key] = value
+                              config_dict['user_interfaces'][uinterface][str(uindex)][pkey] = value
                           else:
-                             config_dict['user-interfaces'][uinterface][key] = value
+                             config_dict['user_interfaces'][uinterface][pkey] = value
 
             m = re.search('^vlan ([\w\-\/]+)$', line, re.DOTALL)
             if m and len(m.group(1)):
@@ -456,16 +476,160 @@ class Comware_5_2(object):
                         name = m.group(1)
                         config_dict['vlans'][vlan_id]['name'] = name
 
-            m = re.search('^local-user ([\w\-\/]+)$', line, re.DOTALL)
+            m = re.search('^\s*domain\s+([\w\.]+)(\s+.*)?$', line, re.DOTALL)
+            if m and len(m.group(1)):
+              if m.group(1) == 'default':
+               if m and len(m.group(2)):
+                m = re.search('^\s+(enable|disable)(\s+[\w\.]+)?$', m.group(2), re.DOTALL)
+                state = m.group(1)
+                config_dict['domain']['default'] = {}
+                config_dict['domain']['default']['state'] = state
+                if m and len(m.group(2)):
+                 name = m.group(2)
+                 config_dict['domain']['default']['name'] = name
+              else:
+                 name = m.group(1)
+                 config_dict['domain'][name] = {}
+                 for dline in config_list[i+1:len(config_list)]:
+                    if re.match('^#$', dline):
+                        break
+                    if re.match('^domain ([\w\.]+)$', dline):
+                        break
+                    # possible output following 'local-user'
+                    for key in ['authentication','authorization']:
+                        m = re.search('^\s*' + key + '\s(.*)$', dline)
+                        if m and len(m.group(1)):
+                            config_dict['domain'][name][key] = {}
+                            value = m.group(1).split()
+                            value_len = len(value)
+                            if value_len == 2:
+                              config_dict['domain'][name][key][value[0]] = {}
+                              config_dict['domain'][name][key][value[0]]['primary'] = value[1]
+                            else:
+                              if value[1] == 'radius-scheme':
+                                value[1] = 'radius_scheme'
+                              elif value[1] == 'hwtacacs-scheme': 
+                                value[1] = 'hwtacacs_scheme'
+                              config_dict['domain'][name][key][value[0]] = {'primary': {value[1]: value[2]}}
+                              config_dict['domain'][name][key][value[0]]['secondary'] = value[3]
+#                              config_dict['domain'][name][key][value[0]]['primary'][value[1]]['name'] = value[2]
+
+            m = re.search('^\s*radius\s+scheme\s+(\w+)$', line, re.DOTALL)
+            if m and len(m.group(1)):
+              rad_name = m.group(1)
+              config_dict['radius_scheme'][rad_name] = {}
+              config_dict['radius_scheme'][rad_name]['authentication'] = {}
+              config_dict['radius_scheme'][rad_name]['authorization'] = {}
+              config_dict['radius_scheme'][rad_name]['accounting'] = {}
+
+              for rline in config_list[i+1:len(config_list)]:
+                 if re.match('^#$', rline):
+                     break
+                 if re.match('^\s*radius\s+scheme\s+(\w+)$', rline):
+                     break
+                 for key in radius_scheme_keywords:
+                     m = re.search('^\s*' + key + '\s(.*)$', rline)
+                     if m and len(m.group(1)):
+                         value = m.group(1)
+                         if key == 'server-type':
+                          key = 'server_type'
+                         if key == 'user-name-format':
+                          key = 'user_name_format'
+                         if key == 'nas-ip':
+                          key = 'nas_ip'
+                         config_dict['radius_scheme'][rad_name][key] = value
+                 for key in ['primary','secondary']:
+                   m = re.search('^\s*' + key + '\s(.*)$', rline)
+                   if m and len(m.group(1)):
+                     content = m.group(1).split()
+                     content_len = len(content)
+                     config_dict['radius_scheme'][rad_name][content[0]][key] = {}
+                     config_dict['radius_scheme'][rad_name][content[0]][key]['server_IP'] = content[1]
+                     if re.match('\d{1,5}', content[2]):
+                       config_dict['radius_scheme'][rad_name][content[0]][key]['server_port'] = content[2]
+
+                     if content_len > 1:
+                       for contline in range(2,content_len):
+                        if re.match('key', content[contline]):
+                         config_dict['radius_scheme'][rad_name][content[0]][key][content[contline]] = {content[contline+1]: content[contline+2]}
+                        if re.match('vpn-instance', content[contline]):
+                         config_dict['radius_scheme'][rad_name][content[0]][key][content[contline]] = content[contline+1]
+                        if re.match('probe', content[contline]):
+                         config_dict['radius_scheme'][rad_name][content[0]][key][content[contline]] = {content[contline+1]: content[contline+2]}
+                        if re.match('interval', content[contline]):
+                         config_dict['radius_scheme'][rad_name][content[0]][key]['probe'][content[contline]] = content[contline+1]
+
+            m = re.search('^\s+snmp-agent\s*(.*?)$', line, re.DOTALL)
+            if m and len(m.group(1)):
+              config_dict['snmp']['state'] = 'enabled'
+              for sline in config_list[i+1:len(config_list)]:
+                 if re.match('^#$', sline):
+                     break
+                 for key in snmp_keywords:
+                     m = re.search('^\s*snmp-agent\s+' + key + '\s(.*)$', sline)
+                     if m and len(m.group(1)):
+                         value = m.group(1)
+                         if key == 'sys-info contact':
+                          key = 'contact'
+                          config_dict['snmp'][key] = value
+                         elif key == 'sys-info location':
+                          key = 'location'
+                          config_dict['snmp'][key] = value
+                         elif key == 'sys-info version':
+                          svalue = value.split()
+                          key = 'version'
+                          config_dict['snmp'][key] = svalue
+                         else:
+                          svalue = value.split()
+                          content_len = len(svalue)
+                          if key == 'group':
+                           config_dict['snmp'][key] = {}
+                           if content_len > 1:
+                            config_dict['snmp'][key][svalue[1]] = {}
+                            for contline in range(0,content_len):
+                             if re.match('(v1|v2c|v3)', svalue[contline]):
+                              config_dict['snmp'][key][svalue[1]]['version'] = svalue[0]
+                             if re.match('privacy', svalue[contline]):
+                              config_dict['snmp'][key][svalue[1]]['security_mode'] = svalue[contline]
+                             if re.match('\w+-view', svalue[contline]):
+                              config_dict['snmp'][key][svalue[1]][svalue[contline]] = svalue[contline+1]
+                              if 'read-view' not in config_dict['snmp'][key][svalue[1]]:
+                               config_dict['snmp'][key][svalue[1]]['read-view'] = svalue[contline+1]
+                             if re.match('acl', svalue[contline]):
+                              config_dict['snmp'][key][svalue[1]][svalue[contline]] = svalue[contline+1]
+                          elif key == 'usm-user':
+                           skey = 'usm_user'
+                           config_dict['snmp'][skey] = {}
+                           if content_len > 1:
+                            config_dict['snmp'][skey][svalue[1]] = {}
+                            config_dict['snmp'][skey][svalue[1]]['group'] = svalue[2]
+                            if re.match('.*?cipher', value):
+                             encryption = 'cipher'
+                            else:
+                             encryption = 'simple'
+                            for contline in range(0,content_len):
+                             if re.match('(v1|v2c|v3)', svalue[contline]):
+                              config_dict['snmp'][skey][svalue[1]]['version'] = svalue[contline]
+                             if re.match('authentication-mode', svalue[contline]):
+                              config_dict['snmp'][skey][svalue[1]]['authentication_mode'] = svalue[contline+1]
+                              config_dict['snmp'][skey][svalue[1]]['authentication_password'] = {encryption: svalue[contline+2]}
+                             if re.match('privacy-mode', svalue[contline]):
+                              config_dict['snmp'][skey][svalue[1]]['privacy_mode'] = svalue[contline+1]
+                              config_dict['snmp'][skey][svalue[1]]['privacy_password'] = {encryption: svalue[contline+2]}
+                             if re.match('acl', svalue[contline]):
+                              config_dict['snmp'][skey][svalue[1]][svalue[contline]] = svalue[contline+1]
+
+
+            m = re.search('^lcal-user ([\w\-\/]+)$', line, re.DOTALL)
             if m and len(m.group(1)):
                 user_id = m.group(1)
-                config_dict['local-user'][user_id] = {}
+                config_dict['local_user'][user_id] = {}
                 # something to collect services that are enabled
                 services_enabled = []
                 for iline in config_list[i+1:len(config_list)]:
                     if re.match('^#$', iline):
                         break
-                    if re.match('^local-user ([\w\-\/]+)$', iline):
+                    if re.match('^local_user ([\w\-\/]+)$', iline):
                         break
                     # possible output following 'local-user'
                     for key in local_user_keywords:
@@ -476,10 +640,10 @@ class Comware_5_2(object):
                             if key == 'service-type':
                                 services_enabled += value.split()
                             else:
-                                config_dict['local-user'][user_id][key] = value
+                                config_dict['local_user'][user_id][key] = value
                 # De-dupe
                 services_enabled = list(OrderedDict.fromkeys(services_enabled))
-                config_dict['local-user'][user_id]['service-type'] =\
+                config_dict['local_user'][user_id]['service_type'] =\
                     services_enabled
             i += 1
 
@@ -539,8 +703,8 @@ class Comware_5_2(object):
 
     def get_facts(self):
         facts = {}
-        if not self.module.params.get('gather_facts'):
-            return facts
+#        if not self.module.params.get('gather_facts'):
+#            return facts
         developer_mode = self.module.params.get('developer-mode')
         self.dev_setup()
 #        facts['summary'] = self._get_summary()
