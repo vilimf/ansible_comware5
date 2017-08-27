@@ -20,7 +20,7 @@
 
 DOCUMENTATION = '''
 ---
-module: comware_5_2_user
+module: comware_5_2_hostname
 version_added: 0.1
 author: Patrick Galbraith
 short_description: Manage users on Comware 5.2-based Switches
@@ -35,12 +35,6 @@ options:
         description:
             - Whether to set the switch into developer mode. Switch doesn't
               much when not in developer mode!
-    state:
-        required: false
-        default: present
-        choices: [ present, absent]
-        description:
-            - State of user.
     save:
         required: false
         default: false
@@ -72,28 +66,11 @@ options:
         default: 5
         description:
             - How long to wait for switch to respond
-    user_name:
+    hostname:
         required: true
-        default: Must be set to valid user name
+        default: Must be set to valid hostname
         description:
-            - Canonical name of user
-    user_pass:
-        required: true
-        default: Must be a valid password
-        description:
-            - User password
-    auth_level:
-        required: false
-        choices: [ "level 0" through "level 3"]
-        default: 0
-        description:
-            - Authorization attribute level
-    services:
-        required: false
-        default: None
-        choices: [ list: web, ssh, telnet, terminal]
-        description:
-            - Service types
+            - hostname
 '''
 
 EXAMPLES = '''
@@ -101,28 +78,21 @@ EXAMPLES = '''
 # file: switch_user.yml
 - hosts: localhost
   tasks:
-  - name: set switch in developer mode
+  - name: set switch hostname
     local_action:
       module: comware_5_2_user
       developer-mode: true
       host: 192.168.1.100
       username: admin
       password: ckrit
-      state: present
-      user_name: jimbob
-      user_pass: seekrit
-      auth_level: level 3
-      services:
-      - web
-      - ssh
-      - terminal
+      hostname: hp5800.lab
 
 OR
 
 - hosts: localhost
   tasks:
   - name: create VLAN 11
-    comware_5_2_user: host=192.168.1.100 username=admin password=ckrit state=present user_name="jimbob" user_pass="seekrit" auth_level="level 2" services=web,ssh,terminal
+    comware_5_2_user: host=192.168.1.100 username=admin password=ckrit hostname=hp5800.lab
 
 '''
 
@@ -131,84 +101,72 @@ from comware_5_2 import Comware_5_2
 from ansible.module_utils.basic import *
 
 
-class Comware_5_2_User(Comware_5_2):
+class Comware_5_2_Hostname(Comware_5_2):
     def dispatch(self):
-        facts = self._handle_user()
+        facts = self._handle_hostname()
         return facts
 
-    def _handle_user(self):
+    def _handle_hostname(self):
         facts = self.get_facts()
-        user = {'name': self.module.params.get('user_name'),
-                'pass': self.module.params.get('user_pass'),
-                'state': self.module.params.get('state'),
-                'auth_level':
-                self.module.params.get('auth_level'),
-                'services': self.module.params.get('services')}
-        if user['state'] == 'absent':
-            facts = self._delete_user(facts, user['name'])
+        hostname = self.module.params.get('hostname')
+        if facts['current_config']['sysname'] != hostname:
+            facts = self._set_hostname(facts, hostname)
         else:
-            facts = self._save_user(facts, user)
+             self.append_message("The hostname %s was already set.\n" % hostname)
         # After adding or deleting vlan, save
         if self.module.params.get('save') is True:
             self.save()
 
         return facts
 
-    def _user_exists(self, facts, name):
-        return name in facts['current_config']['local_user']
+#    def _user_exists(self, facts, name):
+#        return name in facts['current_config']['local-user']
+#
+#    def _user_changed(self, facts, user):
+#        current_user = facts['current_config']['local-user']
+#        return current_user['service-type'] == user['services']
 
-    def _user_changed(self, facts, user):
-        current_user = facts['current_config']['local_user']
-        return current_user['service_type'] == user['services']
-
-    def _save_user(self, facts, user):
+    def _set_hostname(self, facts, hostname):
         #self.dev_setup()
         self.set_changed(False)
 
-        self._exec_command("local_user %s\n" % user['name'],
+        self._exec_command("sysname %s\n" % hostname,
                            "ERROR: unable to enter local user view")
-        self._exec_command("password cipher %s\n" % user['pass'],
-                           "ERROR: unable to set password")
-        self._exec_command("authorization-attribute %s\n" %
-                           user['auth_level'])
-        for service in user['services']:
-            self._send_command("service-type %s\n" % service)
-
         # leave interface view
-        self._quit()
+#        self._quit()
         # refresh facts
         facts = self.get_facts()
         # TODO:
-        if user['name'] in facts['current_config']['local_user']:
+        if hostname == facts['current_config']['sysname']:
             self.set_changed(True)
-            self.append_message("The user %s has been updated\n" %
-                                user['name'])
+            self.append_message("The hostname %s has been updated.\n" %
+                                hostname)
         else:
-            self.append_message("Unable to update the user %s\n" %
-                                user['name'])
+            self.append_message("Unable to update the hostname %s.\n" %
+                                hostname)
 
         return facts
 
-    def _delete_user(self, facts, name):
-        self.set_changed(False)
-        if not self._user_exists(facts, name):
-            self.fail("The user %s does not exist." % name)
-
-        self._send_command("undo local_user %s\n" % name,
-                           "Unable to delete user %s" % name)
-
-        # refresh facts
-        facts = self.get_facts()
-
-        if name not in facts['current_config']['local_user']:
-            self.set_changed(True)
-            self.append_message("User %s deleted\n" % name)
-        else:
-            self.append_message("Unable to delete user %s\n" % name)
-
-        return facts
-
-
+#    def _delete_user(self, facts, name):
+#        self.set_changed(False)
+#        if not self._user_exists(facts, name):
+#            self.fail("The user %s does not exist." % name)
+#
+#        self._send_command("undo local-user %s\n" % name,
+#                           "Unable to delete user %s" % name)
+#
+#        # refresh facts
+#        facts = self.get_facts()
+#
+#        if name not in facts['current_config']['local-user']:
+#            self.set_changed(True)
+#            self.append_message("User %s deleted\n" % name)
+#        else:
+#            self.append_message("Unable to delete user %s\n" % name)
+#
+#        return facts
+#
+#
 def main():
     module = AnsibleModule(
         argument_spec=dict(
@@ -219,19 +177,7 @@ def main():
             username=dict(required=True),
             password=dict(required=True),
             host=dict(required=True),
-            user_name=dict(required=True),
-            user_pass=dict(required=False),
-            auth_level=dict(required=False,
-                            choices=['level 0',
-                                     'level 1',
-                                     'level 2',
-                                     'level 3']),
-            services=dict(required=False,
-                          default=[],
-                          type='list'),
-            state=dict(required=False,
-                       default='present',
-                       choices=['present', 'absent']),
+            hostname=dict(required=True),
             timeout=dict(default=30, type='int'),
             port=dict(default=22, type='int'),
             private_key_file=dict(required=False)
@@ -240,7 +186,7 @@ def main():
     )
     failed = False
 
-    switch = Comware_5_2_User(module,
+    switch = Comware_5_2_Hostname(module,
                               host=module.params.get('host'),
                               username=module.params.get('username'),
                               password=module.params.get('password'),
